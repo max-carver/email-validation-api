@@ -3,11 +3,17 @@ import express from "express";
 import dns from "dns";
 import net from "net";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+const limiter = rateLimit({
+	windowMs: 15 * 60 * 1000, //15 minutes
+	max: 100, // Limit IP to 100 requests
+});
 
 app.use(express.json());
 app.use(cors());
