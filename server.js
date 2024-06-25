@@ -4,6 +4,9 @@ import dns from "dns";
 import net from "net";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
+import { ApiKey } from "./apiKey.model.js";
+import connectToDB from "./db.js";
+import { validateEmail } from "./emailValidation.js";
 
 dotenv.config();
 
@@ -15,21 +18,35 @@ const limiter = rateLimit({
 	max: 100, // Limit IP to 100 requests
 });
 
+connectToDB();
+
 app.use(express.json());
 app.use(limiter);
 app.use(cors());
-app.use(express.static("public")); // Ensure the correct path for serving static files
+app.use(express.static("public"));
 
 // API key middleware
-const apiKeyAuth = (req, res, next) => {
-	const apiKey = req.headers["x-api-key"]; // Updated to match lowercase header
-	if (!apiKey || apiKey !== process.env.API_KEY) {
+const apiKeyAuth = async (req, res, next) => {
+	const apiKey = req.headers["x-api-key"];
+	if (!apiKey) {
 		return res.status(401).json({ error: "Unauthorized" });
 	}
-	next();
+
+	try {
+		const keyDoc = await ApiKey.findOne({ key: apiKey });
+		if (!keyDoc) {
+			return res.status(401).json({ error: "Invalid API Key" });
+		}
+
+		keyDoc.lastUsed = new Date();
+		await keyDoc.save();
+		next();
+	} catch (err) {
+		res.status(500).json({ error: "Unexpected error" });
+	}
 };
 
-// Email validation endpoint
+// Validate Email
 app.post("/v1/validate-email", apiKeyAuth, async (req, res) => {
 	const { email } = req.body;
 
@@ -41,122 +58,22 @@ app.post("/v1/validate-email", apiKeyAuth, async (req, res) => {
 		const validationResult = await validateEmail(email);
 		res.json(validationResult);
 	} catch (error) {
-		console.error("Validation error:", error);
 		res.status(500).json({ error: "An error occurred during validation" });
 	}
 });
 
-async function validateEmail(email) {
-	const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-	if (!emailRegex.test(email)) {
-		return { isValid: false, reason: "Invalid email format" };
-	}
-
-	const [, domain] = email.split("@");
-	const knownProviders = [
-		"gmail.com",
-		"outlook.com",
-		"icloud.com",
-		"yahoo.com",
-		"projectexodus.net",
-	];
-	const isKnownProvider = knownProviders.includes(domain.toLowerCase());
-	const hasMxRecord = await checkMxRecord(domain);
-	const smtpCheck = await performSmtpCheck(email);
-
-	return {
-		isValid: hasMxRecord && smtpCheck.isValid,
-		domain,
-		isKnownProvider,
-		hasMxRecord,
-		smtpCheck: smtpCheck.details,
-	};
-}
-
-function checkMxRecord(domain) {
-	return new Promise((resolve) => {
-		dns.resolveMx(domain, (error, addresses) => {
-			resolve(!error && addresses && addresses.length > 0);
-		});
-	});
-}
-
-async function performSmtpCheck(email) {
-	const [, domain] = email.split("@");
-
+// Generate API Key
+app.post("/generate-api-key", async (req, res) => {
 	try {
-		const mxRecords = await getMxRecords(domain);
-		if (mxRecords.length === 0) {
-			return { isValid: false, details: "No MX records found" };
-		}
-
-		const smtpServer = mxRecords[0].exchange;
-		const socket = await connectToSmtp(smtpServer);
-		await sendCommand(socket, null, 220);
-		await sendCommand(socket, `HELO ${domain}\r\n`, 250);
-		await sendCommand(socket, `MAIL FROM:<check@${domain}>\r\n`, 250);
-		const rcptResponse = await sendCommand(
-			socket,
-			`RCPT TO:<${email}>\r\n`,
-			[250, 251, 550, 553, 554]
-		);
-
-		socket.destroy();
-
-		if (rcptResponse.startsWith("250") || rcptResponse.startsWith("251")) {
-			return { isValid: true, details: "Email address exists" };
-		} else {
-			return { isValid: false, details: "Email address does not exist" };
-		}
-	} catch (error) {
-		return { isValid: false, details: `Success` };
+		const newKey = ApiKey.generateKey();
+		const apiKey = new ApiKey({ key: newKey });
+		await apiKey.save();
+		res.json({ apiKey: newKey });
+	} catch (err) {
+		res.status(500).json({ error: "Failed to generate API Key" });
 	}
-}
+});
 
-function getMxRecords(domain) {
-	return new Promise((resolve, reject) => {
-		dns.resolveMx(domain, (err, addresses) => {
-			if (err) {
-				reject(err);
-			} else {
-				resolve(addresses.sort((a, b) => a.priority - b.priority));
-			}
-		});
-	});
-}
-
-function connectToSmtp(server) {
-	return new Promise((resolve, reject) => {
-		const socket = net.createConnection(25, server);
-		socket.on("connect", () => resolve(socket));
-		socket.on("error", (err) => reject(err));
-	});
-}
-
-function sendCommand(socket, command, expectedCodes) {
-	return new Promise((resolve, reject) => {
-		if (command) {
-			socket.write(command);
-		}
-
-		socket.once("data", (data) => {
-			const response = data.toString();
-			const responseCode = parseInt(response.substring(0, 3), 10);
-
-			if (
-				Array.isArray(expectedCodes) &&
-				expectedCodes.includes(responseCode)
-			) {
-				resolve(response);
-			} else if (responseCode === expectedCodes) {
-				resolve(response);
-			} else {
-				reject(new Error(`Unexpected SMTP response: ${response}`));
-			}
-		});
-	});
-}
-
-app.listen(port, "0.0.0.0", () => {
+app.listen(port, () => {
 	console.log(`Server running on port ${port}`);
 });
