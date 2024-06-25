@@ -16,6 +16,7 @@ const limiter = rateLimit({
 });
 
 app.use(express.json());
+app.use(limiter);
 app.use(cors());
 app.use(express.static("public")); // Ensure the correct path for serving static files
 
@@ -29,7 +30,7 @@ const apiKeyAuth = (req, res, next) => {
 };
 
 // Email validation endpoint
-app.post("/api/validate-email", apiKeyAuth, async (req, res) => {
+app.post("/v1/validate-email", apiKeyAuth, async (req, res) => {
 	const { email } = req.body;
 
 	if (!email) {
